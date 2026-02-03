@@ -497,3 +497,230 @@ class GradientProcessor(BaseProcessor):
         self.ref_frame = None
         self.ref_blur = None
         self.frame_count = 0
+
+
+# ============================================================================
+# MLPProcessor: 基于神经网络的方法
+# ============================================================================
+
+class MLPProcessor(BaseProcessor):
+    """
+    基于MLP神经网络的触觉图像处理器
+    
+    使用训练好的神经网络将颜色映射到梯度，
+    然后通过泊松方程重建深度。
+    
+    与查找表方法相比，MLP方法可以学习更复杂的映射关系。
+    """
+    
+    def __init__(self, model_path: str = None, pad: int = 20, 
+                 calib_file: str = None, device: str = None):
+        """
+        初始化处理器
+        
+        Args:
+            model_path: MLP模型文件路径
+            pad: 边缘裁剪像素数
+            calib_file: 透视变换矩阵文件路径
+            device: 计算设备 ('cuda' 或 'cpu')
+        """
+        super().__init__(pad=pad, calib_file=calib_file)
+        
+        # 延迟导入torch（避免不需要时的依赖）
+        try:
+            import torch
+            self.torch = torch
+        except ImportError:
+            print("[ERROR] 需要安装 PyTorch: pip install torch")
+            self.torch = None
+            self.model = None
+            return
+        
+        # 设备
+        if device is None:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = device
+        
+        # 加载模型
+        if model_path is None:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            model_path = os.path.join(current_dir, "load", "mlp_gradient_model.pt")
+        
+        self.model_path = model_path
+        self.model = None
+        self.norm_params = None
+        self._load_model()
+        
+        # 参考帧
+        self.ref_frame = None
+        self.ref_blur = None
+        
+        # 标记点掩膜阈值
+        self.marker_threshold = 60
+    
+    def _load_model(self):
+        """加载MLP模型"""
+        if self.torch is None:
+            return
+            
+        try:
+            from .model import MLPGradientEncoder
+            
+            # 加载归一化参数
+            norm_path = self.model_path.replace('.pt', '_norm.npz')
+            if os.path.exists(norm_path):
+                self.norm_params = dict(np.load(norm_path))
+                input_dim = int(self.norm_params.get('input_dim', 5))
+                hidden_dim = int(self.norm_params.get('hidden_dim', 32))
+            else:
+                input_dim = 5
+                hidden_dim = 32
+            
+            # 加载模型
+            self.model = MLPGradientEncoder(input_dim=input_dim, hidden_dim=hidden_dim)
+            state_dict = self.torch.load(self.model_path, map_location=self.device)
+            self.model.load_state_dict(state_dict)
+            self.model.eval()
+            self.model.to(self.device)
+            
+            print(f"[INFO] MLP模型已加载: {self.model_path}")
+            print(f"[INFO] 输入维度: {input_dim}, 隐藏层: {hidden_dim}, 设备: {self.device}")
+            
+        except FileNotFoundError:
+            print(f"[WARNING] 模型文件不存在: {self.model_path}")
+            self.model = None
+        except Exception as e:
+            print(f"[WARNING] 加载MLP模型失败: {e}")
+            self.model = None
+    
+    def _get_marker_mask(self, image: np.ndarray) -> np.ndarray:
+        """获取标记点掩膜"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mask = (gray < self.marker_threshold).astype(np.uint8)
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.dilate(mask, kernel, iterations=1)
+        return mask
+    
+    def _infer_gradient(self, image: np.ndarray, ref_image: np.ndarray) -> tuple:
+        """使用MLP推理梯度"""
+        if self.model is None or self.torch is None:
+            return None, None
+        
+        h, w = image.shape[:2]
+        
+        # 获取标记点掩膜
+        marker_mask = self._get_marker_mask(image)
+        ref_marker_mask = self._get_marker_mask(ref_image)
+        combined_mask = cv2.bitwise_or(marker_mask, ref_marker_mask)
+        
+        # 计算差值图像
+        diff = cv2.absdiff(image, ref_image)
+        diff_gray = np.max(diff, axis=2)
+        contact_mask = (diff_gray > 20).astype(np.uint8)
+        
+        # 有效区域
+        valid_mask = contact_mask & (combined_mask == 0)
+        
+        y_coords, x_coords = np.where(valid_mask > 0)
+        
+        if len(x_coords) == 0:
+            return np.zeros((h, w)), np.zeros((h, w))
+        
+        # 准备输入特征
+        bgr_values = image[y_coords, x_coords].astype(np.float32) / 255.0
+        
+        if self.norm_params is not None and 'x_max' in self.norm_params:
+            x_norm = x_coords.astype(np.float32) / float(self.norm_params['x_max'])
+            y_norm = y_coords.astype(np.float32) / float(self.norm_params['y_max'])
+        else:
+            x_norm = x_coords.astype(np.float32) / w
+            y_norm = y_coords.astype(np.float32) / h
+        
+        features = np.column_stack([
+            bgr_values[:, 0], bgr_values[:, 1], bgr_values[:, 2],
+            x_norm, y_norm
+        ])
+        
+        # 推理
+        features_tensor = self.torch.tensor(features, dtype=self.torch.float32).to(self.device)
+        
+        with self.torch.no_grad():
+            gradients = self.model(features_tensor)
+            gradients = gradients.cpu().numpy()
+        
+        # 重建梯度图
+        gx = np.zeros((h, w), dtype=np.float32)
+        gy = np.zeros((h, w), dtype=np.float32)
+        gx[y_coords, x_coords] = gradients[:, 0]
+        gy[y_coords, x_coords] = gradients[:, 1]
+        
+        return gx, gy
+    
+    def _compute_normals(self, gx: np.ndarray, gy: np.ndarray) -> np.ndarray:
+        """从梯度计算法向量"""
+        gz = np.ones_like(gx)
+        magnitude = np.sqrt(gx**2 + gy**2 + gz**2)
+        magnitude[magnitude == 0] = 1
+        normals = np.stack([gx/magnitude, gy/magnitude, gz/magnitude], axis=-1)
+        return normals
+    
+    def process_frame(self, frame: np.ndarray, apply_warp: bool = False):
+        """
+        处理单帧图像
+        
+        Args:
+            frame: BGR格式图像
+            apply_warp: 是否应用透视变换
+            
+        Returns:
+            depth_colored: 深度图可视化
+            normal_colored: 法向量可视化
+            raw_depth: 原始深度数据
+            raw_normals: 原始法向量数据
+        """
+        if apply_warp:
+            frame = self.warp_perspective(frame)
+        
+        h, w = frame.shape[:2]
+        
+        # 第一帧作为参考
+        if self.con_flag:
+            self.ref_frame = frame.copy()
+            self.ref_blur = cv2.GaussianBlur(frame.astype(np.float32), (3, 3), 0)
+            self.con_flag = False
+            return (np.zeros((h, w, 3), dtype=np.uint8),
+                    np.zeros((h, w, 3), dtype=np.uint8),
+                    np.zeros((h, w)),
+                    np.zeros((h, w, 3)))
+        
+        # 推理梯度
+        gx, gy = self._infer_gradient(frame, self.ref_frame)
+        
+        if gx is None:
+            return (np.zeros((h, w, 3), dtype=np.uint8),
+                    np.zeros((h, w, 3), dtype=np.uint8),
+                    np.zeros((h, w)),
+                    np.zeros((h, w, 3)))
+        
+        # 泊松重建
+        depth = fast_poisson(gx, gy)
+        
+        # 计算法向量
+        normals = self._compute_normals(gx, gy)
+        
+        # 可视化
+        depth_norm = depth - depth.min()
+        if depth_norm.max() > 0:
+            depth_norm = depth_norm / depth_norm.max()
+        depth_colored = cv2.applyColorMap((depth_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        
+        normal_colored = ((normals + 1) / 2 * 255).astype(np.uint8)
+        
+        return depth_colored, normal_colored, depth, normals
+    
+    def reset(self):
+        """重置处理器状态"""
+        super().reset()
+        self.ref_frame = None
+        self.ref_blur = None
