@@ -29,12 +29,12 @@ class MLPGradientEncoder(nn.Module):
         
         self.input_dim = input_dim
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(input_dim, 128),
             nn.Tanh(),
+            nn.Linear(128, hidden_dim),
+            nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, output_dim)
         )
 

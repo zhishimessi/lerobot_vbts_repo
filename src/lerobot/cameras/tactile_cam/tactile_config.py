@@ -17,7 +17,7 @@ class TactileCameraConfig(CameraConfig):
     fourcc: str | None = None
     
     # 曝光设置 (Linux V4L2: 通常 1-10000, 较小值=较暗)
-    exposure: int = 463
+    exposure: int = 1500
     auto_exposure: bool = False
     
     # 白平衡设置 (色温范围: 2000-8000K)
@@ -25,7 +25,7 @@ class TactileCameraConfig(CameraConfig):
     auto_wb: bool = False
     
     # RGB增益 (范围: 0.0 - 3.0)
-    r_gain: float = 1.1
+    r_gain: float = 1.0
     g_gain: float = 1.0
     b_gain: float = 1.0
 

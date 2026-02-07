@@ -17,12 +17,13 @@ class CalibrationImageCapture:
             camera_config: 相机配置
         """
         self.camera_config = camera_config
-        self.save_dir1 = "/home/donghy/lerobot/src/lerobot/cameras/tactile_cam/data/test_data"
-        self.save_dir2 = "/home/donghy/lerobot/src/lerobot/cameras/tactile_cam/data/calibration_data"
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        self.save_dir1 = os.path.join(current_dir, "data", "test_data")
+        self.save_dir2 = os.path.join(current_dir, "data", "calibration_data")
         self.camera = None
         self.homography_matrix = None
         self.output_size = None     
-        self.calib_file = "/home/donghy/lerobot/src/lerobot/cameras/tactile_cam/data/calibration_data/homography_matrix.npz"
+        self.calib_file = os.path.join(current_dir, "calibration_data", "homography_matrix_320x240.npz")
     
     def initialize_camera(self):
         print("[INFO] 初始化相机...")
@@ -158,24 +159,29 @@ class CalibrationImageCapture:
 
 def main():
     ov5647_config = TactileCameraConfig(
-        index_or_path="/dev/video2", 
-        fps=25,                       
-        width=640,                   
-        height=480,
-        color_mode=ColorMode.RGB,     
-        rotation=Cv2Rotation.NO_ROTATION, 
-        exposure=600,        # 曝光值
-        wb_temperature=4500, # 白平衡色温
-        r_gain=1.0,          # RGB增益
+        index_or_path="/dev/video0",  # 替换为你的TactileCamera设备路径
+        fps=25,
+        width=320,
+        height=240,
+        color_mode=ColorMode.RGB,
+        rotation=Cv2Rotation.NO_ROTATION,
+        # 曝光设置 (范围: 1-10000, 较小值=较暗)
+        exposure=600,
+        auto_exposure=False,
+        # 白平衡设置 (色温范围: 2000-8000K)
+        wb_temperature=4000,
+        auto_wb=False,
+        # RGB增益 (范围: 0.0 - 3.0)
+        r_gain=1.0,
         g_gain=1.0,
-        b_gain=1.0
+        b_gain=1.0,
     )
 
     capture = CalibrationImageCapture(ov5647_config)
     
     try:
         capture.initialize_camera()
-        capture.capture_images(80) 
+        capture.capture_images(200) 
         
     except KeyboardInterrupt:
         print("\n[INFO] 用户中断捕获")

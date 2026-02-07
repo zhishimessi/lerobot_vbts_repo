@@ -27,8 +27,9 @@ class MMPerPixelCalibrator:
         self.camera = None
         self.homography_matrix = None
         self.output_size = None
-        self.calib_file = "/home/donghy/lerobot/src/lerobot/cameras/tactile_cam/data/calibration_data/homography_matrix.npz"
-        self.result_file = "/home/donghy/lerobot/src/lerobot/cameras/tactile_cam/data/calibration_data/mm_per_pixel.npz"
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        self.calib_file = os.path.join(current_dir, "calibration_data", "homography_matrix_320x240.npz")
+        self.result_file = os.path.join(current_dir, "calibration_data", "mm_per_pixel.npz")
         
         # 检测结果
         self.detected_circles = []
@@ -352,19 +353,24 @@ class MMPerPixelCalibrator:
 
 
 def main():
-    # 相机配置（与 image_processor.py 一致）
+    # 相机配置（与 1_quick_roi_calibrator.py 一致）
     camera_config = TactileCameraConfig(
-        index_or_path="/dev/video2", 
-        fps=25,                       
-        width=640,                   
-        height=480,
-        color_mode=ColorMode.RGB,     
-        rotation=Cv2Rotation.NO_ROTATION, 
+        index_or_path="/dev/video0",  # 替换为你的TactileCamera设备路径
+        fps=25,
+        width=320,
+        height=240,
+        color_mode=ColorMode.RGB,
+        rotation=Cv2Rotation.NO_ROTATION,
+        # 曝光设置 (范围: 1-10000, 较小值=较暗)
         exposure=600,
-        wb_temperature=4500,
-        r_gain=1.05,
+        auto_exposure=False,
+        # 白平衡设置 (色温范围: 2000-8000K)
+        wb_temperature=4000,
+        auto_wb=False,
+        # RGB增益 (范围: 0.0 - 3.0)
+        r_gain=1.0,
         g_gain=1.0,
-        b_gain=1.0
+        b_gain=1.0,
     )
     
     # 创建标定器，使用10mm直径圆柱

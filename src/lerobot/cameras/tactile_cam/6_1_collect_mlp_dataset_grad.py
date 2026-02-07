@@ -16,7 +16,16 @@ MLP训练数据收集脚本
 import cv2
 import numpy as np
 import os
+import sys
 from scipy import signal
+
+# 确保可以导入 lerobot 模块
+# __file__ -> tactile_cam/6_1_xxx.py
+# 向上3层: tactile_cam -> cameras -> lerobot -> src (包含 lerobot 包)
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_src_dir = os.path.abspath(os.path.join(_current_dir, "..", "..", ".."))
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 from lerobot.cameras.tactile_cam.tactile_camera import TactileCamera
 from lerobot.cameras.tactile_cam.tactile_config import TactileCameraConfig
@@ -27,22 +36,24 @@ from lerobot.cameras.configs import ColorMode, Cv2Rotation
 class MLPDataCollector(BaseProcessor):
     """MLP训练数据收集器"""
     
-    def __init__(self, ball_radius_mm: float = 4.0, mm_per_pixel: float = 0.0595, 
-                 pad: int = 20, calib_file: str = None):
+    def __init__(self, ball_radius_mm: float = 4.0, mm_per_pixel: float = 0.1316, 
+                 pad: int = 20, calib_file: str = None, has_marker: bool = False):
         """
         初始化数据收集器
         
         Args:
             ball_radius_mm: 标定球半径 (mm)
-            mm_per_pixel: 像素尺寸 (mm/pixel)
+            mm_per_pixel: 像素尺寸 (mm/pixel)，默认值来自 calibration_data/mm_per_pixel.npz
             pad: 边缘裁剪像素数
             calib_file: 透视变换矩阵文件路径
+            has_marker: 是否有标记点，False则不进行marker检测
         """
         super().__init__(pad=pad, calib_file=calib_file)
         
         self.ball_radius_mm = ball_radius_mm
         self.mm_per_pixel = mm_per_pixel
         self.ball_radius_pixel = ball_radius_mm / mm_per_pixel
+        self.has_marker = has_marker
         
         self.ref_image = None
         self.data_list = []
@@ -192,47 +203,64 @@ class MLPDataCollector(BaseProcessor):
         
         return gx, gy
     
-    def collect_sample(self, image: np.ndarray, center: tuple, radius: int) -> np.ndarray:
+    def collect_sample(self, image: np.ndarray, center: tuple, radius: int, 
+                       add_no_contact_samples: bool = True) -> np.ndarray:
         """
         收集单个样本的训练数据
+        
+        使用颜色差分值作为输入，而不是原始颜色
+        同时收集无接触区域的数据（差分≈0，梯度=0），让模型学会区分
         
         Args:
             image: 当前帧（BGR）
             center: 接触圆心
             radius: 接触圆半径
+            add_no_contact_samples: 是否添加无接触区域样本
             
         Returns:
-            数据数组 [N, 7]: [B, G, R, X, Y, gx, gy]
+            数据数组 [N, 7]: [dB, dG, dR, X, Y, gx, gy]  # 差分颜色
         """
         if self.ref_image is None:
             raise ValueError("请先设置参考图像")
         
         h, w = image.shape[:2]
         
-        # 获取标记点掩膜
-        marker_mask = self.get_marker_mask(image)
-        ref_marker_mask = self.get_marker_mask(self.ref_image)
-        combined_marker_mask = cv2.bitwise_or(marker_mask, ref_marker_mask)
+        # 计算颜色差分图像（当前帧 - 参考帧）
+        # 使用有符号差分，范围 [-255, 255]
+        diff_image = image.astype(np.float32) - self.ref_image.astype(np.float32)
         
         # 创建接触区域掩膜
         contact_mask = np.zeros((h, w), dtype=np.uint8)
         cv2.circle(contact_mask, center, radius, 255, -1)
         
-        # 有效区域 = 接触区域 - 标记点
-        valid_mask = (contact_mask > 0) & (combined_marker_mask == 0)
+        # 根据是否有marker决定有效区域
+        if self.has_marker:
+            # 获取标记点掩膜
+            marker_mask = self.get_marker_mask(image)
+            ref_marker_mask = self.get_marker_mask(self.ref_image)
+            combined_marker_mask = cv2.bitwise_or(marker_mask, ref_marker_mask)
+            # 有效区域 = 接触区域 - 标记点
+            valid_mask = (contact_mask > 0) & (combined_marker_mask == 0)
+            # 无接触有效区域 = 非接触区域 - 标记点 - 边界
+            no_contact_valid = (contact_mask == 0) & (combined_marker_mask == 0)
+        else:
+            # 没有marker时，接触区域即为有效区域
+            valid_mask = contact_mask > 0
+            no_contact_valid = contact_mask == 0
+        
         valid_mask = valid_mask.astype(np.float32)
         
         # 计算真实梯度
         gx, gy = self.compute_gradient_from_sphere(center, radius, image.shape, valid_mask)
         
-        # 提取有效像素的数据
+        # 提取有效像素的数据（接触区域）
         y_coords, x_coords = np.where(valid_mask > 0)
         
         if len(x_coords) == 0:
             return np.array([])
         
-        # BGR值
-        bgr_values = image[y_coords, x_coords]
+        # 颜色差分值（归一化到 [-1, 1]）
+        diff_values = diff_image[y_coords, x_coords] / 255.0
         
         # 梯度值
         gx_values = gx[y_coords, x_coords]
@@ -241,31 +269,82 @@ class MLPDataCollector(BaseProcessor):
         # 过滤掉NaN值
         valid_idx = ~(np.isnan(gx_values) | np.isnan(gy_values))
         
-        # 组合数据 [B, G, R, X, Y, gx, gy]
-        data = np.column_stack([
-            bgr_values[valid_idx, 0],  # B
-            bgr_values[valid_idx, 1],  # G
-            bgr_values[valid_idx, 2],  # R
-            x_coords[valid_idx],       # X
-            y_coords[valid_idx],       # Y
-            gx_values[valid_idx],      # gx
-            gy_values[valid_idx]       # gy
+        # 组合数据 [dB, dG, dR, X, Y, gx, gy]
+        contact_data = np.column_stack([
+            diff_values[valid_idx, 0],  # dB (差分)
+            diff_values[valid_idx, 1],  # dG (差分)
+            diff_values[valid_idx, 2],  # dR (差分)
+            x_coords[valid_idx],        # X
+            y_coords[valid_idx],        # Y
+            gx_values[valid_idx],       # gx
+            gy_values[valid_idx]        # gy
         ])
         
-        return data
+        # 添加无接触区域的样本（差分小，梯度=0）
+        if add_no_contact_samples:
+            # 排除边界区域（距离接触圆太近的区域）
+            buffer_radius = radius + 10
+            buffer_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.circle(buffer_mask, center, buffer_radius, 255, -1)
+            no_contact_valid = no_contact_valid & (buffer_mask == 0)
+            
+            # 排除图像边缘
+            edge_margin = 10
+            no_contact_valid[:edge_margin, :] = False
+            no_contact_valid[-edge_margin:, :] = False
+            no_contact_valid[:, :edge_margin] = False
+            no_contact_valid[:, -edge_margin:] = False
+            
+            # 提取无接触像素
+            nc_y, nc_x = np.where(no_contact_valid)
+            
+            if len(nc_x) > 0:
+                # 随机采样，数量与接触区域相当
+                n_contact = len(contact_data)
+                n_sample = min(len(nc_x), n_contact)
+                sample_idx = np.random.choice(len(nc_x), n_sample, replace=False)
+                
+                nc_diff = diff_image[nc_y[sample_idx], nc_x[sample_idx]] / 255.0
+                
+                # 无接触区域梯度为0
+                no_contact_data = np.column_stack([
+                    nc_diff[:, 0],  # dB
+                    nc_diff[:, 1],  # dG
+                    nc_diff[:, 2],  # dR
+                    nc_x[sample_idx],  # X
+                    nc_y[sample_idx],  # Y
+                    np.zeros(n_sample),  # gx = 0
+                    np.zeros(n_sample)   # gy = 0
+                ])
+                
+                # 合并接触和无接触数据
+                contact_data = np.vstack([contact_data, no_contact_data])
+                print(f"[INFO] 添加了 {n_sample} 个无接触样本")
+        
+        return contact_data
 
 
 def main():
     """主函数：收集MLP训练数据"""
     
-    # 相机配置
+    # 相机配置（与 1_quick_roi_calibrator.py 一致）
     camera_config = TactileCameraConfig(
-        index_or_path="/dev/video2", 
-        fps=25,                       
-        width=640,                   
-        height=480,
-        color_mode=ColorMode.RGB,     
-        rotation=Cv2Rotation.NO_ROTATION, 
+        index_or_path="/dev/video0",  # 替换为你的TactileCamera设备路径
+        fps=25,
+        width=320,
+        height=240,
+        color_mode=ColorMode.RGB,
+        rotation=Cv2Rotation.NO_ROTATION,
+        # 曝光设置 (范围: 1-10000, 较小值=较暗)
+        exposure=600,
+        auto_exposure=False,
+        # 白平衡设置 (色温范围: 2000-8000K)
+        wb_temperature=4000,
+        auto_wb=False,
+        # RGB增益 (范围: 0.0 - 3.0)
+        r_gain=1.0,
+        g_gain=1.0,
+        b_gain=1.0,
     )
     
     # 数据保存目录
@@ -277,21 +356,26 @@ def main():
     BALL_RADIUS_MM = 4.0  # 标定球半径 (mm)
     
     # 尝试加载 mm_per_pixel
-    mm_per_pixel_file = os.path.join(current_dir, "data", "calibration_data", "mm_per_pixel.npz")
+    mm_per_pixel_file = os.path.join(current_dir, "calibration_data", "mm_per_pixel.npz")
     if os.path.exists(mm_per_pixel_file):
         data = np.load(mm_per_pixel_file)
         MM_PER_PIXEL = float(data['mm_per_pixel'])
         print(f"[INFO] 加载 mm_per_pixel: {MM_PER_PIXEL:.4f}")
     else:
-        MM_PER_PIXEL = 0.0595  # 默认值
+        MM_PER_PIXEL = 0.1316  # 默认值
         print(f"[WARNING] 使用默认 mm_per_pixel: {MM_PER_PIXEL:.4f}")
     
     # 初始化
     camera = TactileCamera(camera_config)
+    
+    # 是否有标记点（marker）
+    HAS_MARKER = False  # 设置为False表示没有marker
+    
     collector = MLPDataCollector(
         ball_radius_mm=BALL_RADIUS_MM,
         mm_per_pixel=MM_PER_PIXEL,
-        pad=20
+        pad=20,
+        has_marker=HAS_MARKER
     )
     
     print("\n" + "="*60)
@@ -300,7 +384,60 @@ def main():
     print(f"球半径: {BALL_RADIUS_MM} mm")
     print(f"像素尺寸: {MM_PER_PIXEL:.4f} mm/pixel")
     print(f"球半径(像素): {BALL_RADIUS_MM/MM_PER_PIXEL:.1f} pixels")
+    print(f"是否有marker: {HAS_MARKER}")
     print("="*60)
+    
+    # 检查是否有已存在的数据集
+    dataset_path = os.path.join(save_dir, "mlp_dataset.npy")
+    ref_path = os.path.join(save_dir, "ref.jpg")
+    all_data = []
+    sample_count = 0
+    
+    if os.path.exists(dataset_path):
+        print(f"\n[INFO] 发现已存在的数据集: {dataset_path}")
+        existing_data = np.load(dataset_path)
+        print(f"[INFO] 已有数据点: {len(existing_data)}")
+        
+        # 统计已有样本数量
+        sample_files = [f for f in os.listdir(save_dir) if f.startswith("sample_") and f.endswith(".jpg")]
+        existing_samples = len(sample_files)
+        print(f"[INFO] 已有样本: {existing_samples}")
+        
+        # 询问用户选择
+        print("\n选择操作模式:")
+        print("  [c] 继续采集 - 在已有数据基础上继续")
+        print("  [n] 重新采集 - 清除所有数据重新开始")
+        print("  [q] 退出")
+        
+        while True:
+            choice = input("\n请输入选择 [c/n/q]: ").strip().lower()
+            if choice == 'c':
+                # 继续采集
+                all_data = existing_data.tolist()
+                sample_count = existing_samples
+                print(f"[INFO] 将继续采集，从样本 {sample_count + 1} 开始")
+                
+                # 加载已有的参考图
+                if os.path.exists(ref_path):
+                    ref_image = cv2.imread(ref_path)
+                    collector.set_reference(ref_image)
+                    print("[INFO] 已加载之前的参考图")
+                break
+            elif choice == 'n':
+                # 重新采集
+                print("[INFO] 清除已有数据...")
+                # 删除所有数据文件
+                for f in os.listdir(save_dir):
+                    if f.startswith("sample_") or f in ["mlp_dataset.npy", "ref.jpg"]:
+                        os.remove(os.path.join(save_dir, f))
+                print("[INFO] 已清除，将重新开始采集")
+                break
+            elif choice == 'q':
+                print("[INFO] 用户取消")
+                return
+            else:
+                print("[WARNING] 无效选择，请输入 c/n/q")
+    
     print("\n操作说明:")
     print("  1. 首先拍摄参考图（无接触）- 按 'r'")
     print("  2. 用标定球压印传感器 - 按 空格 拍照")
@@ -308,9 +445,6 @@ def main():
     print("  4. 重复步骤2-3收集更多数据")
     print("  5. 按 'q' 保存并退出")
     print("="*60 + "\n")
-    
-    all_data = []
-    sample_count = 0
     
     try:
         camera.connect()

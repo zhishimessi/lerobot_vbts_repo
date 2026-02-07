@@ -11,10 +11,17 @@ MLP模型训练脚本
 """
 
 import os
+import sys
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader, random_split
 import matplotlib.pyplot as plt
+
+# 确保可以导入 lerobot 模块
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_src_dir = os.path.abspath(os.path.join(_current_dir, "..", "..", ".."))
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 from lerobot.cameras.tactile_cam.model import MLPGradientEncoder
 
@@ -63,7 +70,7 @@ def eval_epoch(model, data_loader, loss_fn, device):
 
 def train(dataset_path: str, model_save_path: str, 
           input_dim: int = 5, hidden_dim: int = 32,
-          num_epochs: int = 50, batch_size: int = 64,
+          num_epochs: int = 100, batch_size: int = 64,
           learning_rate: float = 0.001, weight_decay: float = 1e-5,
           train_ratio: float = 0.8, device: str = None):
     """
@@ -91,16 +98,17 @@ def train(dataset_path: str, model_save_path: str,
     data = np.load(dataset_path)
     print(f"[INFO] 数据形状: {data.shape}")
     
-    # 数据格式: [B, G, R, X, Y, gx, gy]
+    # 数据格式: [dB, dG, dR, X, Y, gx, gy]
+    # 注意：dB, dG, dR 是颜色差分值，已经归一化到 [-1, 1] 范围
     if input_dim == 5:
-        features = data[:, :5]  # B, G, R, X, Y
+        features = data[:, :5].copy()  # dB, dG, dR, X, Y
     else:
-        features = data[:, :3]  # B, G, R only
+        features = data[:, :3].copy()  # dB, dG, dR only
     labels = data[:, 5:7]      # gx, gy
     
     # 归一化特征
-    # BGR: [0, 255] -> [0, 1]
-    features[:, :3] = features[:, :3] / 255.0
+    # 颜色差分值已经是 /255.0 归一化的，不需要再处理
+    print(f"[INFO] 颜色差分范围: [{features[:, :3].min():.3f}, {features[:, :3].max():.3f}]")
     
     # XY: 归一化到 [0, 1]（如果使用）
     if input_dim == 5:
@@ -224,8 +232,8 @@ def main():
     config = {
         'input_dim': 5,          # 输入维度: 5(BGR+XY) 或 3(BGR only)
         'hidden_dim': 32,        # 隐藏层维度
-        'num_epochs': 50,        # 训练轮数
-        'batch_size': 64,        # 批次大小
+        'num_epochs': 200,       # 训练轮数
+        'batch_size': 2048,        # 批次大小
         'learning_rate': 0.001,  # 学习率
         'weight_decay': 1e-5,    # 权重衰减
         'train_ratio': 0.8,      # 训练集比例

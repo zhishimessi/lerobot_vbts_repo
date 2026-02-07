@@ -11,6 +11,13 @@
 import cv2
 import numpy as np
 import os
+import sys
+
+# 确保可以导入 lerobot 模块
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_src_dir = os.path.abspath(os.path.join(_current_dir, "..", "..", ".."))
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 from lerobot.cameras.tactile_cam.tactile_camera import TactileCamera
 from lerobot.cameras.tactile_cam.tactile_config import TactileCameraConfig
@@ -22,19 +29,24 @@ from lerobot.cameras.configs import ColorMode, Cv2Rotation
 def main():
     """主函数：使用梯度方法测试触觉传感器"""
     
-    # 相机配置
+    # 相机配置（与 1_quick_roi_calibrator.py 一致）
     camera_config = TactileCameraConfig(
-        index_or_path="/dev/video2", 
-        fps=25,                       
-        width=640,                   
-        height=480,
-        color_mode=ColorMode.RGB,     
+        index_or_path="/dev/video2",  # 替换为你的TactileCamera设备路径
+        fps=25,
+        width=320,
+        height=240,
+        color_mode=ColorMode.RGB,
         rotation=Cv2Rotation.NO_ROTATION,
+        # 曝光设置 (范围: 1-10000, 较小值=较暗)
         exposure=600,
-        wb_temperature=4500,
-        r_gain=1.1,
+        auto_exposure=False,
+        # 白平衡设置 (色温范围: 2000-8000K)
+        wb_temperature=4000,
+        auto_wb=False,
+        # RGB增益 (范围: 0.0 - 3.0)
+        r_gain=1.0,
         g_gain=1.0,
-        b_gain=1.0
+        b_gain=1.0,
     )
     
     # 数据保存目录

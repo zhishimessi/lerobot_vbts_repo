@@ -35,7 +35,7 @@ class BaseProcessor:
         
         if calib_file is None:
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            calib_file = os.path.join(current_dir, "data", "calibration_data", "homography_matrix.npz")
+            calib_file = os.path.join(current_dir, "calibration_data", "homography_matrix_320x240.npz")
         self.calib_file = calib_file
         
         self._load_homography()
@@ -106,7 +106,8 @@ class LookupTableProcessor(BaseProcessor):
     然后通过泊松方程重建深度。
     """
     
-    def __init__(self, table_path: str = None, pad: int = 20, calib_file: str = None):
+    def __init__(self, table_path: str = None, pad: int = 20, calib_file: str = None, 
+                 has_marker: bool = False):
         """
         初始化处理器
         
@@ -114,8 +115,12 @@ class LookupTableProcessor(BaseProcessor):
             table_path: 查找表文件路径
             pad: 边缘裁剪像素数
             calib_file: 透视变换矩阵文件路径
+            has_marker: 是否有标记点，False则不进行marker检测
         """
         super().__init__(pad=pad, calib_file=calib_file)
+        
+        # 是否有marker
+        self.has_marker = has_marker
         
         # 查找表参数
         self.zeropoint = [-38, -30, -66]
@@ -230,13 +235,16 @@ class LookupTableProcessor(BaseProcessor):
         if self.con_flag:
             # 第一帧作为参考
             ref_image = raw_image.copy()
-            marker = self._marker_detection(ref_image)
-            keypoints = self._find_dots((1 - marker) * 255)
+            
+            if self.has_marker:
+                marker = self._marker_detection(ref_image)
+                keypoints = self._find_dots((1 - marker) * 255)
+                
+                if self.reset_shape:
+                    marker_mask = self._make_mask(ref_image, keypoints)
+                    ref_image = cv2.inpaint(ref_image, marker_mask, 3, cv2.INPAINT_TELEA)
             
             if self.reset_shape:
-                marker_mask = self._make_mask(ref_image, keypoints)
-                ref_image = cv2.inpaint(ref_image, marker_mask, 3, cv2.INPAINT_TELEA)
-                
                 self.red_mask = (ref_image[:, :, 2] > 12).astype(np.uint8)
                 self.dmask = self._defect_mask(ref_image[:, :, 0])
                 self.ref_blur = cv2.GaussianBlur(ref_image.astype(np.float32), (5, 5), 0)
@@ -253,7 +261,12 @@ class LookupTableProcessor(BaseProcessor):
         
         # 处理后续帧
         raw_image = cv2.GaussianBlur(raw_image.astype(np.float32), (5, 5), 0)
-        marker_mask = self._marker_detection(raw_image)
+        
+        # 根据是否有marker决定是否检测marker
+        if self.has_marker:
+            marker_mask = self._marker_detection(raw_image)
+        else:
+            marker_mask = np.zeros((h, w), dtype=np.uint8)
         
         # 计算梯度
         grad_img = self._matching_v2(raw_image, self.ref_blur, self.blur_inverse)
@@ -271,8 +284,12 @@ class LookupTableProcessor(BaseProcessor):
         normal_z = 1.0 / denom
         raw_normals = np.stack([normal_x, normal_y, normal_z], axis=-1)
         
-        # 法向量可视化
-        N_disp = 0.5 * (raw_normals + 1.0)
+        # 法向量可视化（强力增强对比度）
+        # 放大 x, y 分量以增强可视化效果
+        normal_x_enhanced = np.clip(raw_normals[:, :, 0] * 8.0, -1, 1)
+        normal_y_enhanced = np.clip(raw_normals[:, :, 1] * 8.0, -1, 1)
+        normals_enhanced = np.stack([normal_x_enhanced, normal_y_enhanced, raw_normals[:, :, 2]], axis=-1)
+        N_disp = 0.5 * (normals_enhanced + 1.0)
         N_disp = np.clip(N_disp, 0, 1)
         normal_colored = (N_disp * 255).astype(np.uint8)
         normal_colored = cv2.cvtColor(normal_colored, cv2.COLOR_RGB2BGR)
@@ -514,7 +531,7 @@ class MLPProcessor(BaseProcessor):
     """
     
     def __init__(self, model_path: str = None, pad: int = 20, 
-                 calib_file: str = None, device: str = None):
+                 calib_file: str = None, device: str = None, has_marker: bool = False):
         """
         初始化处理器
         
@@ -523,8 +540,12 @@ class MLPProcessor(BaseProcessor):
             pad: 边缘裁剪像素数
             calib_file: 透视变换矩阵文件路径
             device: 计算设备 ('cuda' 或 'cpu')
+            has_marker: 是否有标记点，False则不进行marker检测
         """
         super().__init__(pad=pad, calib_file=calib_file)
+        
+        # 是否有marker
+        self.has_marker = has_marker
         
         # 延迟导入torch（避免不需要时的依赖）
         try:
@@ -609,18 +630,22 @@ class MLPProcessor(BaseProcessor):
         
         h, w = image.shape[:2]
         
-        # 获取标记点掩膜
-        marker_mask = self._get_marker_mask(image)
-        ref_marker_mask = self._get_marker_mask(ref_image)
-        combined_mask = cv2.bitwise_or(marker_mask, ref_marker_mask)
-        
         # 计算差值图像
         diff = cv2.absdiff(image, ref_image)
         diff_gray = np.max(diff, axis=2)
         contact_mask = (diff_gray > 20).astype(np.uint8)
         
-        # 有效区域
-        valid_mask = contact_mask & (combined_mask == 0)
+        # 根据是否有marker决定有效区域
+        if self.has_marker:
+            # 获取标记点掩膜
+            marker_mask = self._get_marker_mask(image)
+            ref_marker_mask = self._get_marker_mask(ref_image)
+            combined_mask = cv2.bitwise_or(marker_mask, ref_marker_mask)
+            # 有效区域 = 接触区域 - 标记点
+            valid_mask = contact_mask & (combined_mask == 0)
+        else:
+            # 没有marker时，接触区域即为有效区域
+            valid_mask = contact_mask
         
         y_coords, x_coords = np.where(valid_mask > 0)
         

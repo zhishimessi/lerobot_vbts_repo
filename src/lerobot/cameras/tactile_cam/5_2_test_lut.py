@@ -20,14 +20,24 @@ from lerobot.cameras.configs import ColorMode, Cv2Rotation
 def main():
     """主函数：使用查找表方法测试触觉传感器"""
     
-    # 相机配置
+    # 相机配置（与 1_quick_roi_calibrator.py 一致）
     camera_config = TactileCameraConfig(
-        index_or_path="/dev/video2", 
-        fps=25,                       
-        width=640,                   
-        height=480,
-        color_mode=ColorMode.RGB,     
-        rotation=Cv2Rotation.NO_ROTATION, 
+        index_or_path="/dev/video2",  # 替换为你的TactileCamera设备路径
+        fps=25,
+        width=320,
+        height=240,
+        color_mode=ColorMode.RGB,
+        rotation=Cv2Rotation.NO_ROTATION,
+        # 曝光设置 (范围: 1-10000, 较小值=较暗)
+        exposure=600,
+        auto_exposure=False,
+        # 白平衡设置 (色温范围: 2000-8000K)
+        wb_temperature=4000,
+        auto_wb=False,
+        # RGB增益 (范围: 0.0 - 3.0)
+        r_gain=1.0,
+        g_gain=1.0,
+        b_gain=1.0,
     )
     
     # 数据保存目录
@@ -38,11 +48,22 @@ def main():
     # 初始化组件
     camera = TactileCamera(camera_config)
     processor = LookupTableProcessor()
-    marker_tracker = GelSightMarkerTracker()
-    visualizer = TactileVisualizer(
-        windows=['original', 'depth', 'normal', 'marker'],
-        window_size=(640, 480)
-    )
+    
+    # 是否有标记点（marker）
+    HAS_MARKER = False  # 设置为False表示没有marker
+    
+    if HAS_MARKER:
+        marker_tracker = GelSightMarkerTracker()
+        visualizer = TactileVisualizer(
+            windows=['original', 'depth', 'normal', 'marker'],
+            window_size=(640, 480)
+        )
+    else:
+        marker_tracker = None
+        visualizer = TactileVisualizer(
+            windows=['original', 'depth', 'normal'],
+            window_size=(640, 480)
+        )
     
     try:
         camera.connect()
@@ -71,21 +92,23 @@ def main():
                 # 透视变换
                 warped_frame = processor.warp_perspective(frame_bgr)
                 
-                # 初始化标记点追踪器（跳过前几帧）
-                if not marker_initialized and frame_count > 5:
-                    marker_tracker.reinit(warped_frame)
-                    marker_tracker.start_display_markerIm()
-                    marker_initialized = True
-                    print("[INFO] 标记点追踪器已初始化")
+                # 初始化标记点追踪器（跳过前几帧，仅在有marker时）
+                if HAS_MARKER and marker_tracker is not None:
+                    if not marker_initialized and frame_count > 5:
+                        marker_tracker.reinit(warped_frame)
+                        marker_tracker.start_display_markerIm()
+                        marker_initialized = True
+                        print("[INFO] 标记点追踪器已初始化")
                 
                 # 处理图像
                 depth_colored, normal_colored, raw_depth, raw_normals = \
                     processor.process_frame(warped_frame)
                 
-                # 更新标记点追踪
-                if marker_initialized:
+                # 更新标记点追踪（仅在有marker时）
+                displacements = None
+                if HAS_MARKER and marker_tracker is not None and marker_initialized:
                     marker_tracker.update_markerMotion(warped_frame)
-                displacements = marker_tracker.get_marker_displacements()
+                    displacements = marker_tracker.get_marker_displacements()
                 
                 # 收集数据
                 if not processor.con_flag and raw_depth is not None:
@@ -107,7 +130,8 @@ def main():
                     break
                 elif key == ord('r'):
                     processor.reset()
-                    marker_initialized = False
+                    if HAS_MARKER:
+                        marker_initialized = False
                     print("[INFO] 处理器已重置")
                 elif key == ord('s') and raw_depth is not None:
                     timestamp = int(cv2.getTickCount())
@@ -134,7 +158,8 @@ def main():
             print(f"[INFO] 保存了 {len(all_normal_maps)} 帧数据到 {save_dir}")
         
         visualizer.cleanup()
-        marker_tracker.cleanup()
+        if HAS_MARKER and marker_tracker is not None:
+            marker_tracker.cleanup()
         camera.disconnect()
         print("[INFO] 相机已断开")
 

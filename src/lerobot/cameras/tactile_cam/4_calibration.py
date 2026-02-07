@@ -371,13 +371,19 @@ if __name__=="__main__":
         ref_img = cv2.imread(os.path.join(test_data_dir, "ref.jpg"))
         ref_img = cali.crop_image(ref_img, pad)
 
-        marker = cali.mask_marker(ref_img)
-        keypoints = cali.find_dots(marker)
-        marker_mask = cali.make_mask(ref_img, keypoints)
-        marker_image = np.dstack((marker_mask,marker_mask,marker_mask))
-        ref_img = cv2.inpaint(ref_img,marker_mask,3,cv2.INPAINT_TELEA)
-
-        has_marker = True 
+        # 是否有标记点（marker）
+        # 设置为False表示没有marker，跳过marker检测
+        has_marker = False
+        
+        if has_marker:
+            marker = cali.mask_marker(ref_img)
+            keypoints = cali.find_dots(marker)
+            marker_mask = cali.make_mask(ref_img, keypoints)
+            marker_image = np.dstack((marker_mask,marker_mask,marker_mask))
+            ref_img = cv2.inpaint(ref_img,marker_mask,3,cv2.INPAINT_TELEA)
+        else:
+            marker_mask = np.zeros_like(ref_img[:,:,0]).astype(np.uint8)
+            print("[INFO] 无marker模式，跳过marker检测")
         img_list = glob.glob(os.path.join(test_data_dir, "sample*.jpg"))
         
         # ========== 第一阶段：收集差值统计，自动估计归一化参数 ==========
